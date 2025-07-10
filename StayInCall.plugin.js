@@ -1,49 +1,81 @@
 /**
  * @name StayInCall
  * @author headx
- * @version 1.0.0
- * @description Auto-updating BetterDiscord plugin that prevents being disconnected from solo calls. (headx | the psychon)
- * @source https://github.com/headxdev/StayInCall
+ * @version 1.2.0
+ * @description Bleibt automatisch in Solo- & privaten Calls & joint neu, wenn du rausfliegst – made by headx | the psychon
  */
 
 module.exports = class StayInCall {
   start() {
-    const url = "https://raw.githubusercontent.com/headxdev/StayInCall/main/StayInCall.remote.js";
-    const request = require("request");
-    const fs = require("fs");
-    const path = require("path");
+    this.callInterval = null;
+    this.reconnectInterval = null;
 
-    const pluginFile = path.join(BdApi.Plugins.folder, "StayInCall.remote.js");
+    const RTCModule = BdApi.WebpackModules.getByProps("getRTCConnection");
+    const VoiceModule = BdApi.WebpackModules.getByProps("joinVoiceChannel", "leaveVoiceChannel");
+    const SelectedChannelStore = BdApi.WebpackModules.getByProps("getVoiceChannelId");
+    const VoiceStateStore = BdApi.WebpackModules.getByProps("getVoiceStatesForChannel");
 
-    // Fetch latest version from GitHub
-    request.get(url, (err, res, body) => {
-      if (!err && res.statusCode === 200) {
-        fs.writeFileSync(pluginFile, body);
-        BdApi.showToast("StayInCall updated from GitHub ✔️", {type: "success"});
+    const reconnectToCall = () => {
+      // Hole aktuelle Voice-Channel-ID des Users, egal ob privat oder Gruppe
+      const voiceChannelId = SelectedChannelStore.getVoiceChannelId() || this.getPrivateCallChannelId();
 
-        // Dynamically load and execute
-        try {
-          eval(body);
-        } catch (e) {
-          BdApi.showToast("StayInCall execution error ❌", {type: "error"});
-          console.error("[StayInCall] Eval error:", e);
-        }
-      } else {
-        BdApi.showToast("Could not update StayInCall 😕", {type: "error"});
-        console.warn("[StayInCall] Update failed. Using existing version.");
-        if (fs.existsSync(pluginFile)) {
-          try {
-            const localCode = fs.readFileSync(pluginFile, "utf8");
-            eval(localCode);
-          } catch (e) {
-            console.error("[StayInCall] Local fallback error:", e);
-          }
+      if (!voiceChannelId) {
+        console.warn("[StayInCall] Kein Voice-Channel gefunden zum Reconnect.");
+        return;
+      }
+
+      try {
+        console.log(`[StayInCall] Rejoin Call mit Channel-ID: ${voiceChannelId}`);
+        VoiceModule.joinVoiceChannel({ channelId: voiceChannelId, selfMute: false, selfDeaf: false });
+        BdApi.showToast("StayInCall: Rejoin durchgeführt 🔁", { type: "info" });
+      } catch (err) {
+        console.error("[StayInCall] Fehler beim Rejoin:", err);
+      }
+    };
+
+    this.getPrivateCallChannelId = () => {
+      // Suche im VoiceStateStore nach privatem Call (normalerweise 2 User im Channel)
+      const voiceStates = VoiceStateStore.getVoiceStatesForChannel();
+      if (!voiceStates) return null;
+
+      for (const [channelId, states] of Object.entries(voiceStates)) {
+        // Prüfe, ob du (self) in dem Channel bist
+        if (states.some(state => state.userId === BdApi.findModuleByProps("getCurrentUser").getCurrentUser().id)) {
+          return channelId; // Channel gefunden
         }
       }
-    });
+      return null;
+    };
+
+    // Ping für Call Keepalive alle 60 Sekunden
+    this.callInterval = setInterval(() => {
+      const rtc = RTCModule.getRTCConnection();
+      if (rtc && rtc.isConnected()) {
+        rtc.setTransportOptions({ latencyTest: Math.random() });
+        console.log("[StayInCall] Ping gesendet – Call wird gehalten.");
+      }
+    }, 60000);
+
+    // Reconnect Check alle 15 Sekunden
+    this.reconnectInterval = setInterval(() => {
+      const rtc = RTCModule.getRTCConnection();
+      const isConnected = rtc && rtc.isConnected();
+
+      // Aktueller Channel (normal oder privat)
+      const currentChannel = SelectedChannelStore.getVoiceChannelId() || this.getPrivateCallChannelId();
+
+      if (!isConnected && currentChannel) {
+        console.warn("[StayInCall] Raus aus dem Call? Rejoin wird gestartet...");
+        reconnectToCall();
+      }
+    }, 15000);
+
+    BdApi.showToast("StayInCall v1.2 aktiv 🔄 – Auto-Reconnect für private & Solo-Calls", { type: "success" });
   }
 
   stop() {
-    BdApi.showToast("StayInCall unloaded 💤", {type: "info"});
+    clearInterval(this.callInterval);
+    clearInterval(this.reconnectInterval);
+    BdApi.showToast("StayInCall deaktiviert ❌", { type: "info" });
   }
 };
